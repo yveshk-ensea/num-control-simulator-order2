@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Numerical Control Simulator - 2nd Order Systems</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;font-size:11px}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:3px;background:#e2e8f0;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:#fff;border:2px solid var(--ac,#2563eb);box-shadow:0 1px 3px rgba(0,0,0,.25);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:15px;height:15px;border-radius:50%;background:#fff;border:2px solid var(--ac,#2563eb);box-shadow:0 1px 3px rgba(0,0,0,.25);cursor:pointer}
+.tb{padding:4px 9px;border:1px solid #cbd5e1;background:#fff;cursor:pointer;font-size:10px;font-weight:600;color:#475569;transition:all .15s;white-space:nowrap}
+.tb:first-child{border-radius:4px 0 0 4px}.tb:last-child{border-radius:0 4px 4px 0}
+.tb.on{background:#2563eb;color:#fff;border-color:#2563eb}
+.pn{background:#f8fafc;border-radius:6px;padding:7px 9px;margin-bottom:6px;border:1px solid #e2e8f0}
+.pn h4{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin:0 0 5px}
+.sub{padding:4px 6px;margin:3px 0;border-radius:4px;border:1px solid #e2e8f0}
+</style>
+</head>
+<body><div id="root"></div>
+<script type="text/babel">
+const {useState,useMemo,useCallback,useRef}=React;
+
+/* ─── Sliders ─── */
+function LS({label,value,min,max,onChange,unit="",color="#2563eb",extra}){
+  const lmin=Math.log10(Math.max(min,1e-10)),lmax=Math.log10(max);
+  const pos=(Math.log10(Math.max(value,min))-lmin)/(lmax-lmin);
+  const h=e=>{const p=parseFloat(e.target.value);onChange(parseFloat((10**(lmin+p*(lmax-lmin))).toPrecision(3)));};
+  const f=v=>v>=100?v.toFixed(0):v>=10?v.toFixed(1):v>=1?v.toFixed(2):v>=.01?v.toFixed(3):v.toExponential(1);
+  return(<div style={{marginBottom:7}}>
+    <div style={{display:"flex",justifyContent:"space-between",marginBottom:1}}>
+      <span style={{fontWeight:600,fontSize:10}}>{label}</span>
+      <span style={{fontWeight:700,color,fontFamily:"monospace",fontSize:10}}>{f(value)} {unit}</span>
+    </div>
+    <input type="range" min={0} max={1} step={.002} value={pos} onChange={h} style={{"--ac":color}}/>
+    {extra&&<div style={{fontSize:9,color:"#64748b",marginTop:1}}>{extra}</div>}
+  </div>);
+}
+function SS({label,value,min,max,step,onChange,unit="",color="#2563eb",extra}){
+  const f=v=>Math.abs(v)<.001&&v!==0?v.toExponential(1):step<0.1?v.toFixed(2):step<1?v.toFixed(1):v.toFixed(0);
+  return(<div style={{marginBottom:7}}>
+    <div style={{display:"flex",justifyContent:"space-between",marginBottom:1}}>
+      <span style={{fontWeight:600,fontSize:10}}>{label}</span>
+      <span style={{fontWeight:700,color,fontFamily:"monospace",fontSize:10}}>{f(value)} {unit}</span>
+    </div>
+    <input type="range" min={min} max={max} step={step} value={value} onChange={e=>onChange(parseFloat(e.target.value))} style={{"--ac":color}}/>
+    {extra&&<div style={{fontSize:9,color:"#64748b",marginTop:1}}>{extra}</div>}
+  </div>);
+}
+function TG({label,checked,onChange,color="#2563eb"}){
+  return(<label style={{display:"flex",alignItems:"center",gap:5,cursor:"pointer",marginBottom:4,userSelect:"none"}}>
+    <div onClick={()=>onChange(!checked)} style={{width:28,height:16,borderRadius:8,padding:2,backgroundColor:checked?color:"#cbd5e1",transition:"all .2s",display:"flex",alignItems:"center",flexShrink:0}}>
+      <div style={{width:12,height:12,borderRadius:6,backgroundColor:"#fff",transform:checked?"translateX(12px)":"translateX(0)",transition:"all .2s",boxShadow:"0 1px 2px rgba(0,0,0,.2)"}}/>
+    </div>
+    <span style={{fontWeight:500,fontSize:10}}>{label}</span>
+  </label>);
+}
+
+/* ─── Simulation ─── */
+function sim({K,tau,zeta,Kp,Ki,Kd,Td,Te,Tr,smith,Km,taum,zetam,Trm,dt,tMax,st,disc,delay,ol,amp,uSat,noiseAmp,pertAmp,pertTime,filtN}){
+  const NN=Math.round(tMax/dt),pp=Math.max(1,Math.round(.001/dt)),sp=Math.max(1,Math.round(Te/dt));
+  const t=[],y=[],uu=[];
+  const a0=Kp+Ki*Te/2, a1=-Kp+Ki*Te/2;
+  const b0=Kp+Ki*Te/2+2*Kd/Te,b1=-Kp+Ki*Te/2-4*Kd/Te,b2=2*Kd/Te;
+  // Plant: 2nd order x1'=x2, x2'=-wn²x1-2ζwnx2+Kwn²u, y=x1
+  const wn=1/tau,wn2=wn*wn;
+  let x1=0,x2=0,u=0,xi=0,xd_p=0,ep=0,ep2=0,up=0;
+  let xdf=0,up_pi=0,ep_pi=0;
+  const useFilt=filtN>0&&Kd>0;
+  const Td_=Td||0.001;
+  const dL=Math.max(1,Math.ceil(Tr/dt)),dB=new Float64Array(dL);let dI=0;
+  const wnm=1/taum;let xm1=0,xm2=0;
+  const mL=Math.max(1,Math.ceil(Trm/dt)),mB=new Float64Array(mL);let mI=0;
+  const sB=new Float64Array(delay?dL:1);let sI=0;
+  const A=amp||1;
+  let seed=12345;
+  const rng=()=>{seed=(seed*1103515245+12345)&0x7fffffff;return(seed/0x7fffffff-0.5)*2;};
+  const gnoise=()=>(rng()+rng()+rng())/1.73;
+  const pT=pertTime/1000;
+  for(let i=0;i<=NN;i++){
+    const tt=i*dt,r=tt>=st?A:0;
+    const dp=pertAmp&&tt>=pT?pertAmp:0;
+    const xMeas=x1+dp+(noiseAmp?noiseAmp*gnoise():0);
+    const e0=r-xMeas;
+    if(ol){u=r;}
+    else if(!disc){
+      const e=e0;xi+=dt*Ki*e;
+      if(useFilt){xdf+=dt*(filtN/Td_)*(e-xdf);u=Kp*e+xi+Kp*filtN*(e-xdf);}
+      else{const de=(e-xd_p)/dt;xd_p=e;u=Kp*e+xi+Kd*de;}
+    }
+    else if(i%sp===0){
+      let ef=e0;
+      if(smith&&delay){const ynd=xm1,yd=mB[mI%mL];ef=r-xMeas-ynd+yd;}
+      if(useFilt){const u_pi=up_pi+a0*ef+a1*ep_pi;ep_pi=ef;up_pi=u_pi;const af=filtN*Te/(Td_+filtN*Te);xdf=xdf+af*(ef-xdf);u=u_pi+Kp*filtN*(ef-xdf);}
+      else{u=up+b0*ef+b1*ep+b2*ep2;ep2=ep;ep=ef;up=u;}
+    }
+    if(uSat>0){u=Math.max(-uSat,Math.min(uSat,u));}
+    let ua=u;
+    if(delay){
+      if(!disc||!smith){dB[dI%dL]=u;ua=dB[(dI+1)%dL];dI++;}
+      else{sB[sI%dL]=u;ua=sB[(sI+1)%dL];sI++;
+        const a2m=xm2;xm2+=dt*(-wnm*wnm*xm1-2*(zetam||0.7)*wnm*xm2+Km*wnm*wnm*u);xm1+=dt*a2m;
+        mB[mI%mL]=xm1;mI++;}
+    }
+    const a2=x2;x2+=dt*(-wn2*x1-2*zeta*wn*x2+K*wn2*ua);x1+=dt*a2;
+    if(i%pp===0){t.push(Math.round(tt*1e4)/10);y.push(x1+dp);uu.push(u);}
+  }
+  return{t,y,u:uu};
+}
+
+/* ─── Chart ─── */
+function Chart({data,traces,title,h=340,xMax,xMin=0,yMin,yMax,hLines,noConsigne}){
+  const W=700,H=h,p={t:28,r:165,b:34,l:48};
+  const pw=W-p.l-p.r,ph=H-p.t-p.b;
+  const xMn=xMin,xMx=xMax;
+  const yMn=yMin,yMx=yMax;
+  const sx=x=>p.l+(x-xMn)/(xMx-xMn)*pw,sy=y=>p.t+(1-(y-yMn)/(yMx-yMn))*ph;
+  const mp=ys=>{let d="";ys.forEach((v,i)=>{const xt=data[i]?.t;if(xt===undefined||xt>xMx||xt<xMn)return;d+=(d===""?"M":"L")+sx(xt)+","+sy(Math.max(yMn,Math.min(yMx,v)));});return d;};
+  const vis=traces.filter(t=>t.s);
+  return(<svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",background:"#fff",borderRadius:6,border:"1px solid #e2e8f0"}}>
+    {[...Array(7)].map((_,i)=><line key={`xg${i}`} x1={sx(xMn+i*(xMx-xMn)/6)} y1={p.t} x2={sx(xMn+i*(xMx-xMn)/6)} y2={H-p.b} stroke="#f1f5f9"/>)}
+    {[...Array(6)].map((_,i)=><line key={`yg${i}`} x1={p.l} y1={sy(yMn+i*(yMx-yMn)/5)} x2={W-p.r} y2={sy(yMn+i*(yMx-yMn)/5)} stroke="#f1f5f9"/>)}
+    <line x1={p.l} y1={H-p.b} x2={W-p.r} y2={H-p.b} stroke="#94a3b8"/><line x1={p.l} y1={p.t} x2={p.l} y2={H-p.b} stroke="#94a3b8"/>
+    {[...Array(7)].map((_,i)=><text key={i} x={sx(xMn+i*(xMx-xMn)/6)} y={H-p.b+13} textAnchor="middle" fontSize={8} fill="#64748b">{Math.round(xMn+i*(xMx-xMn)/6)}</text>)}
+    <text x={p.l+pw/2} y={H-3} textAnchor="middle" fontSize={9} fill="#475569">t (ms)</text>
+    {[...Array(6)].map((_,i)=><text key={i} x={p.l-4} y={sy(yMn+i*(yMx-yMn)/5)+3} textAnchor="end" fontSize={8} fill="#64748b">{(yMn+i*(yMx-yMn)/5).toFixed(2)}</text>)}
+    <text x={p.l+pw/2} y={14} textAnchor="middle" fontSize={11} fontWeight="bold" fill="#1e293b">{title}</text>
+    {/* Horizontal reference lines (saturation etc) */}
+    {hLines&&hLines.map((hl,i)=>{const yy=sy(hl.v);return yy>=p.t&&yy<=H-p.b?<g key={`hl${i}`}><line x1={p.l} y1={yy} x2={W-p.r} y2={yy} stroke={hl.c||"#dc2626"} strokeWidth={1} strokeDasharray="8,4"/><text x={W-p.r+3} y={yy+3} fontSize={8} fill={hl.c||"#dc2626"} fontWeight="600">{hl.label}</text></g>:null;})}
+    {!noConsigne&&<>
+      {xMn<0&&<line x1={sx(xMn)} y1={sy(0)} x2={sx(0)} y2={sy(0)} stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="5,3"/>}
+      <path d={mp(data.map(d=>d.c))} fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="5,3"/>
+    </>}
+    {vis.map(t=><g key={t.k}>{xMn<0&&<line x1={sx(xMn)} y1={sy(0)} x2={sx(Math.min(0,xMx))} y2={sy(0)} stroke={t.color} strokeWidth={t.w||2} strokeDasharray={t.dash||"none"} opacity={0.5}/>}<path d={mp(t.y)} fill="none" stroke={t.color} strokeWidth={t.w||2} strokeDasharray={t.dash||"none"}/></g>)}
+    <rect x={W-p.r+8} y={p.t} width={155} height={vis.length*13+14} rx={4} fill="rgba(248,250,252,.95)" stroke="#e2e8f0"/>
+    <text x={W-p.r+14} y={p.t+10} fontSize={8} fontWeight="700" fill="#475569">Legend</text>
+    {vis.map((t,i)=><g key={i} transform={`translate(${W-p.r+14},${p.t+20+i*12})`}><line x1={0} y1={0} x2={12} y2={0} stroke={t.color} strokeWidth={2} strokeDasharray={t.dash||"none"}/><text x={16} y={3} fontSize={8.5} fill="#334155">{t.label}</text></g>)}
+  </svg>);
+}
+
+/* ─── Clickable Pole Map ─── */
+function PoleMap({poles,zeros,title,isZ,onPlace,w=220,h=190}){
+  const ref=useRef();
+  const dragging=useRef(false);
+  const cx=w/2,cy=h/2,scl=isZ?w/3.2:w/120;
+  const px=v=>cx+v.re*scl,py=v=>cy-v.im*scl;
+  const toSvg=(clientX,clientY)=>{
+    const rect=ref.current.getBoundingClientRect();
+    // Account for preserveAspectRatio xMidYMid meet
+    const svgAR=w/h, domAR=rect.width/rect.height;
+    let scale,offX,offY;
+    if(domAR>svgAR){scale=rect.height/h;offX=(rect.width-w*scale)/2;offY=0;}
+    else{scale=rect.width/w;offX=0;offY=(rect.height-h*scale)/2;}
+    const mx=(clientX-rect.left-offX)/scale;
+    const my=(clientY-rect.top-offY)/scale;
+    return{x:mx,y:my};
+  };
+  const toCoord=(clientX,clientY)=>{
+    const p=toSvg(clientX,clientY);
+    return{re:(p.x-cx)/scl,im:-(p.y-cy)/scl};
+  };
+  const findPole=(clientX,clientY)=>{
+    const p=toSvg(clientX,clientY);
+    for(let i=0;i<poles.length;i++){
+      const dx=px(poles[i])-p.x,dy=py(poles[i])-p.y;
+      if(dx*dx+dy*dy<15*15) return i;
+    }
+    return -1;
+  };
+  const onDown=e=>{
+    e.preventDefault();
+    const cl=e.touches?e.touches[0]:e;
+    const idx=findPole(cl.clientX,cl.clientY);
+    if(idx>=0){dragging.current=true;document.body.style.cursor="grabbing";}
+    else{const pt=toCoord(cl.clientX,cl.clientY);if(onPlace)onPlace(pt);}
+  };
+  const onMove=e=>{
+    if(!dragging.current)return;
+    e.preventDefault();
+    const cl=e.touches?e.touches[0]:e;
+    const pt=toCoord(cl.clientX,cl.clientY);
+    if(onPlace)onPlace(pt);
+  };
+  const onUp=()=>{
+    if(dragging.current){dragging.current=false;document.body.style.cursor="";}
+  };
+  React.useEffect(()=>{
+    document.addEventListener("mousemove",onMove);
+    document.addEventListener("mouseup",onUp);
+    document.addEventListener("touchmove",onMove,{passive:false});
+    document.addEventListener("touchend",onUp);
+    return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);document.removeEventListener("touchmove",onMove);document.removeEventListener("touchend",onUp);};
+  });
+  const [hover,setHover]=useState(false);
+  const onSvgMove=e=>{
+    if(dragging.current)return;
+    setHover(findPole(e.clientX,e.clientY)>=0);
+  };
+  const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+  return(<svg ref={ref} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="xMidYMid meet" onMouseDown={onDown} onTouchStart={onDown} onMouseMove={onSvgMove}
+    style={{width:"100%",background:"#fff",borderRadius:6,border:"1px solid #e2e8f0",cursor:hover?"grab":"crosshair",userSelect:"none"}}>
+    <line x1={0} y1={cy} x2={w} y2={cy} stroke="#e2e8f0"/><line x1={cx} y1={0} x2={cx} y2={h} stroke="#e2e8f0"/>
+    {isZ&&<circle cx={cx} cy={cy} r={w/3.2} fill="none" stroke="#cbd5e1" strokeDasharray="3,2"/>}
+    {!isZ&&<line x1={cx} y1={0} x2={cx} y2={h} stroke="#cbd5e1" strokeWidth={1.5}/>}
+    <text x={w-3} y={cy-3} textAnchor="end" fontSize={8} fill="#94a3b8">{isZ?"Re":"σ"}</text>
+    <text x={cx+3} y={10} fontSize={8} fill="#94a3b8">{isZ?"Im":"jω"}</text>
+    {isZ?[-.5,.5,1].map(v=><text key={v} x={cx+v*w/3.2} y={cy+10} fontSize={7} fill="#bbb">{v}</text>):
+      [-50,-25,25,50].map(v=><text key={v} x={clamp(cx+v*w/120,10,w-10)} y={cy+10} fontSize={7} fill="#bbb">{v}</text>)}
+    <text x={w/2} y={h-3} textAnchor="middle" fontSize={9} fontWeight="600" fill="#475569">{title}</text>
+    {zeros.filter(z=>{const x=px(z);return x>0&&x<w;}).map((z,i)=><circle key={`z${i}`} cx={px(z)} cy={py(z)} r={5} fill="none" stroke="#059669" strokeWidth={1.5}/>)}
+    {poles.filter(p=>{const x=px(p);return x>0&&x<w;}).map((p,i)=><g key={`p${i}`}>
+      {/* Invisible hit area */}
+      <circle cx={px(p)} cy={py(p)} r={12} fill="transparent" style={{cursor:"grab"}}/>
+      <line x1={px(p)-5} y1={py(p)-5} x2={px(p)+5} y2={py(p)+5} stroke="#dc2626" strokeWidth={2.5}/>
+      <line x1={px(p)-5} y1={py(p)+5} x2={px(p)+5} y2={py(p)-5} stroke="#dc2626" strokeWidth={2.5}/>
+    </g>)}
+  </svg>);
+}
+
+/* ─── Bode Plot ─── */
+function BodePlot({Kp,Ki,Kd,Td,filtN,Te,isZ,title,color="#2563eb",w=200,h=180,tau}){
+  const fMin=0.1,fMax=1e5,nPts=120;
+  const pts=[];
+  for(let i=0;i<nPts;i++){
+    const f=fMin*Math.pow(fMax/fMin,i/(nPts-1));
+    const omega=2*Math.PI*f;
+    let re,im;
+    if(!isZ){
+      re=Kp; im=0;
+      if(Ki>0){re+=0; im+=-Ki/omega;}
+      if(Kd>0){
+        if(filtN>0){
+          const a=omega*Td/filtN, den=1+a*a;
+          re+=Kd*omega*a/den; im+=Kd*omega/den;
+        } else {
+          re+=0; im+=Kd*omega;
+        }
+      }
+    } else {
+      const wT=omega*Te;
+      if(wT>Math.PI){pts.push({f,mag:NaN,phase:NaN});continue;}
+      const zr=Math.cos(wT),zi=Math.sin(wT);
+      if(Ki===0&&Kd===0){re=Kp;im=0;}
+      else if(Kd===0){
+        const b0=Kp+Ki*Te/2, b1=-Kp+Ki*Te/2;
+        const nr=b0*zr+b1, ni=b0*zi;
+        const dr=zr-1, di=zi;
+        const dd=dr*dr+di*di;
+        re=(nr*dr+ni*di)/dd; im=(ni*dr-nr*di)/dd;
+      } else {
+        const b0=Kp+Ki*Te/2+2*Kd/Te, b1t=-Kp+Ki*Te/2-4*Kd/Te, b2=2*Kd/Te;
+        const z2r=zr*zr-zi*zi, z2i=2*zr*zi;
+        const nr=b0*z2r+b1t*zr+b2, ni=b0*z2i+b1t*zi;
+        const dr=z2r-zr, di=z2i-zi;
+        const dd=dr*dr+di*di;
+        re=(nr*dr+ni*di)/dd; im=(ni*dr-nr*di)/dd;
+      }
+    }
+    const mag=20*Math.log10(Math.sqrt(re*re+im*im));
+    const phase=Math.atan2(im,re)*180/Math.PI;
+    pts.push({f,mag,phase});
+  }
+  const valid=pts.filter(p=>isFinite(p.mag));
+  if(valid.length<2) return null;
+  const pad={l:32,r:6,t:14,b:12,mid:20};
+  const pw_=w-pad.l-pad.r, magH=(h-pad.t-pad.b-pad.mid)/2, phH=magH;
+  const magTop=pad.t, phTop=pad.t+magH+pad.mid;
+  const fMinV=valid[0].f, fMaxV=valid[valid.length-1].f;
+  const sx=f=>pad.l+Math.log10(f/fMinV)/Math.log10(fMaxV/fMinV)*pw_;
+  // Mag range
+  let mgMin=Infinity,mgMax=-Infinity;
+  valid.forEach(p=>{mgMin=Math.min(mgMin,p.mag);mgMax=Math.max(mgMax,p.mag);});
+  const mgPad=(mgMax-mgMin)*0.15||10;mgMin-=mgPad;mgMax+=mgPad;
+  const syM=v=>magTop+(1-(v-mgMin)/(mgMax-mgMin))*magH;
+  // Phase range: snap to 90° multiples
+  let phMinR=Infinity,phMaxR=-Infinity;
+  valid.forEach(p=>{phMinR=Math.min(phMinR,p.phase);phMaxR=Math.max(phMaxR,p.phase);});
+  const phMin=Math.floor(phMinR/90-0.3)*90;
+  const phMax=Math.ceil(phMaxR/90+0.3)*90;
+  const syP=v=>phTop+(1-(v-phMin)/(phMax-phMin))*phH;
+  // Phase grid lines at 90° multiples
+  const phTicks=[];
+  for(let d=phMin;d<=phMax;d+=90) phTicks.push(d);
+  // Path builders
+  const pathM=valid.map((p,i)=>`${i===0?"M":"L"}${sx(p.f)},${syM(p.mag)}`).join("");
+  const pathP=valid.map((p,i)=>`${i===0?"M":"L"}${sx(p.f)},${syP(p.phase)}`).join("");
+  // Log ticks
+  const decades=[];for(let d=Math.floor(Math.log10(fMinV));d<=Math.ceil(Math.log10(fMaxV));d++)decades.push(d);
+  // Plant cutoff frequency
+  const fc=tau>0?1/(2*Math.PI*tau):0;
+  const fcX=fc>fMinV&&fc<fMaxV?sx(fc):-1;
+  return(<svg viewBox={`0 0 ${w} ${h}`} style={{width:"100%",background:"#fff",borderRadius:6,border:"1px solid #e2e8f0",marginTop:4}}>
+    <text x={w/2} y={10} textAnchor="middle" fontSize={8} fontWeight="600" fill="#475569">{title}</text>
+    {decades.map(d=>{const x=sx(Math.pow(10,d));return x>=pad.l&&x<=w-pad.r?<g key={`m${d}`}>
+      <line x1={x} y1={magTop} x2={x} y2={magTop+magH} stroke="#f1f5f9" strokeWidth={1}/>
+      <line x1={x} y1={phTop} x2={x} y2={phTop+phH} stroke="#f1f5f9" strokeWidth={1}/>
+    </g>:null;})}
+    {/* Plant cutoff vertical line */}
+    {fcX>pad.l&&fcX<w-pad.r&&<>
+      <line x1={fcX} y1={magTop} x2={fcX} y2={magTop+magH} stroke="#dc2626" strokeWidth={1} strokeDasharray="3,2"/>
+      <line x1={fcX} y1={phTop} x2={fcX} y2={phTop+phH} stroke="#dc2626" strokeWidth={1} strokeDasharray="3,2"/>
+      <text x={fcX+2} y={magTop+8} fontSize={5} fill="#dc2626">fc={fc.toFixed(0)}Hz</text>
+    </>}
+    {/* Mag axes */}
+    <line x1={pad.l} y1={magTop+magH} x2={w-pad.r} y2={magTop+magH} stroke="#94a3b8" strokeWidth={0.5}/>
+    <line x1={pad.l} y1={magTop} x2={pad.l} y2={magTop+magH} stroke="#94a3b8" strokeWidth={0.5}/>
+    {mgMin<0&&mgMax>0&&<line x1={pad.l} y1={syM(0)} x2={w-pad.r} y2={syM(0)} stroke="#e2e8f0" strokeWidth={1} strokeDasharray="3,2"/>}
+    <path d={pathM} fill="none" stroke={color} strokeWidth={1.5}/>
+    <text x={pad.l-2} y={magTop+4} textAnchor="end" fontSize={6} fill="#94a3b8">{mgMax.toFixed(0)}dB</text>
+    <text x={pad.l-2} y={magTop+magH} textAnchor="end" fontSize={6} fill="#94a3b8">{mgMin.toFixed(0)}</text>
+    <text x={w/2} y={magTop+magH+9} textAnchor="middle" fontSize={6} fill="#94a3b8">|C| (dB)</text>
+    {/* Phase axes */}
+    <line x1={pad.l} y1={phTop+phH} x2={w-pad.r} y2={phTop+phH} stroke="#94a3b8" strokeWidth={0.5}/>
+    <line x1={pad.l} y1={phTop} x2={pad.l} y2={phTop+phH} stroke="#94a3b8" strokeWidth={0.5}/>
+    {/* Phase grid at 90° multiples */}
+    {phTicks.map(d=>{const y=syP(d);return y>=phTop&&y<=phTop+phH?<g key={`ph${d}`}>
+      <line x1={pad.l} y1={y} x2={w-pad.r} y2={y} stroke={d===0?"#94a3b8":"#e2e8f0"} strokeWidth={d===0?0.8:0.5} strokeDasharray={d===0?"":"3,2"}/>
+      <text x={pad.l-2} y={y+3} textAnchor="end" fontSize={5.5} fill="#94a3b8">{d}°</text>
+    </g>:null;})}
+    <path d={pathP} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="4,2"/>
+    {/* Frequency labels */}
+    {decades.filter(d=>{const x=sx(Math.pow(10,d));return x>=pad.l&&x<=w-pad.r;}).map(d=>
+      <text key={`fl${d}`} x={sx(Math.pow(10,d))} y={phTop+phH+9} textAnchor="middle" fontSize={6} fill="#94a3b8">10{d>=0?`${d}`:d<0?`⁻${-d}`:""}</text>
+    )}
+    <text x={w/2} y={h-1} textAnchor="middle" fontSize={6} fill="#94a3b8">f (Hz) — ∠C (---)</text>
+  </svg>);
+}
+
+// Polynomial root finder (companion matrix eigenvalues via QR-like iteration not needed - use Durand-Kerner)
+function polyRoots(coeffs){
+  // coeffs = [a_n, a_{n-1}, ..., a_0] for a_n*x^n + ... + a_0
+  const n=coeffs.length-1;if(n<=0)return[];
+  if(n===1)return[{re:-coeffs[1]/coeffs[0],im:0}];
+  if(n===2){const a=coeffs[0],b=coeffs[1],cc=coeffs[2],d=b*b-4*a*cc;
+    if(d>=0)return[{re:(-b+Math.sqrt(d))/(2*a),im:0},{re:(-b-Math.sqrt(d))/(2*a),im:0}];
+    const r=-b/(2*a),im=Math.sqrt(-d)/(2*a);return[{re:r,im},{re:r,im:-im}];}
+  // Durand-Kerner for degree 3+
+  const roots=[];for(let i=0;i<n;i++){const a=0.4+0.9*i/n;roots.push({re:Math.cos(2.4*i)*a,im:Math.sin(2.4*i)*a});}
+  for(let iter=0;iter<200;iter++){
+    for(let i=0;i<n;i++){
+      let pr=1,pi_=0;
+      for(let j=0;j<n;j++){if(j===i)continue;
+        const dr=roots[i].re-roots[j].re,di=roots[i].im-roots[j].im;
+        const tr=pr*dr-pi_*di,ti=pr*di+pi_*dr;pr=tr;pi_=ti;}
+      // evaluate poly at roots[i]
+      let vr=0,vi=0,zr=1,zi=0;
+      for(let k=n;k>=0;k--){
+        vr+=coeffs[n-k]*zr;vi+=coeffs[n-k]*zi;
+        const tr2=zr*roots[i].re-zi*roots[i].im,ti2=zr*roots[i].im+zi*roots[i].re;zr=tr2;zi=ti2;
+      }
+      const dd=pr*pr+pi_*pi_;if(dd<1e-30)continue;
+      roots[i].re-=(vr*pr+vi*pi_)/dd;roots[i].im-=(vi*pr-vr*pi_)/dd;
+    }
+  }
+  // Clean up near-real roots
+  roots.forEach(r=>{if(Math.abs(r.im)<1e-8)r.im=0;});
+  return roots;
+}
+
+function computePoles({K,tau,zeta,Kp,Ki,Kd,Te,isZ}){
+  const poles=[],zeros=[];
+  const wn=1/tau;
+  if(!isZ){
+    // CL char eq for P: s²+2ζwns+wn²(1+KKp) = 0
+    // For PI: s³+2ζwn·s²+(wn²+K·Kp·wn²)s+K·Ki·wn² = 0
+    // For PID: s³+(2ζwn+K·Kd·wn²)s²+(wn²+K·Kp·wn²)s+K·Ki·wn² = 0
+    const p=[1, 2*zeta*wn+K*Kd*wn*wn, wn*wn+K*Kp*wn*wn, K*Ki*wn*wn];
+    if(Ki===0&&Kd===0){
+      // Simpler: quadratic
+      const r=polyRoots([1,2*zeta*wn,wn*wn*(1+K*Kp)]);
+      r.forEach(rr=>poles.push(rr));
+    } else if(Ki===0){
+      const r=polyRoots([1,2*zeta*wn+K*Kd*wn*wn,wn*wn*(1+K*Kp)]);
+      r.forEach(rr=>poles.push(rr));
+    } else {
+      const r=polyRoots(p);
+      r.forEach(rr=>poles.push(rr));
+    }
+    // Plant OL poles
+    const disc=zeta*zeta-1;
+    if(disc>=0){zeros.push({re:-zeta*wn+wn*Math.sqrt(disc),im:0});zeros.push({re:-zeta*wn-wn*Math.sqrt(disc),im:0});}
+    else{zeros.push({re:-zeta*wn,im:wn*Math.sqrt(-disc)});zeros.push({re:-zeta*wn,im:-wn*Math.sqrt(-disc)});}
+    if(Ki>0)zeros.push({re:-Ki/Kp,im:0});
+  } else {
+    // Discrete: approximate by evaluating CL with ZOH-discretized plant
+    // Plant poles in z
+    const disc=zeta*zeta-1;
+    let zp1,zp2;
+    if(disc>=0){zp1=Math.exp((-zeta*wn+wn*Math.sqrt(disc))*Te);zp2=Math.exp((-zeta*wn-wn*Math.sqrt(disc))*Te);
+      zeros.push({re:zp1,im:0});zeros.push({re:zp2,im:0});}
+    else{const s=Math.exp(-zeta*wn*Te),w=wn*Math.sqrt(-disc)*Te;
+      zp1={re:s*Math.cos(w),im:s*Math.sin(w)};zp2={re:s*Math.cos(w),im:-s*Math.sin(w)};
+      zeros.push(zp1);zeros.push(zp2);}
+    // Approx CL poles using continuous-to-discrete mapping of CL poles
+    const contPoles=computePoles({K,tau,zeta,Kp,Ki,Kd,Te,isZ:false}).poles;
+    contPoles.forEach(p=>{
+      const m=Math.exp(p.re*Te);
+      poles.push({re:m*Math.cos(p.im*Te),im:m*Math.sin(p.im*Te)});
+    });
+  }
+  return{poles,zeros};
+}
+
+/* ─── Block Diagrams (compact) ─── */
+function BD({type,K,tau,zeta,Kp,Ki,Te,Tr,noiseOn,pertOn}){
+  const W=660,Ti=Ki>0?(Kp/Ki).toFixed(3):"∞",cLbl=Ki>0?"C":"Kp";
+  const B=({x,y,w=65,h=28,label,sub,fill="#fff",stroke="#334155",fs=10})=><g><rect x={x-w/2} y={y-h/2} width={w} height={h} rx={3} fill={fill} stroke={stroke} strokeWidth={1.5}/><text x={x} y={sub?y-1:y+3} textAnchor="middle" fontSize={fs} fontWeight="600" fill={stroke}>{label}</text>{sub&&<text x={x} y={y+10} textAnchor="middle" fontSize={8} fill="#64748b">{sub}</text>}</g>;
+  const Ar=({x1,y1,x2,y2,c="#334155"})=>{const dx=x2-x1,dy=y2-y1,l=Math.sqrt(dx*dx+dy*dy),ux=dx/l,uy=dy/l,ax=x2-ux*5,ay=y2-uy*5;return<g><line x1={x1} y1={y1} x2={ax} y2={ay} stroke={c} strokeWidth={1.3}/><polygon points={`${x2},${y2} ${ax-uy*3},${ay+ux*3} ${ax+uy*3},${ay-ux*3}`} fill={c}/></g>;};
+  const L=({x1,y1,x2,y2,c="#334155"})=><line x1={x1} y1={y1} x2={x2} y2={y2} stroke={c} strokeWidth={1.3}/>;
+  const Sm=({x,y})=><g><circle cx={x} cy={y} r={10} fill="#fff" stroke="#334155" strokeWidth={1.3}/><text x={x} y={y+1} textAnchor="middle" fontSize={12} fontWeight="bold" fill="#334155">{"Σ"}</text><text x={x-7} y={y-5} fontSize={7} fill="#059669" fontWeight="bold">+</text><text x={x+3} y={y+9} fontSize={7} fill="#dc2626" fontWeight="bold">{"−"}</text></g>;
+  const Sp=({x,y,c="#f97316"})=><g><circle cx={x} cy={y} r={8} fill="#fff" stroke={c} strokeWidth={1.2}/><text x={x} y={y+1} textAnchor="middle" fontSize={10} fontWeight="bold" fill={c}>+</text></g>;
+  const Dot=({x,y})=><circle cx={x} cy={y} r={2.5} fill="#334155"/>;
+  const Lb=({x,y,t,c="#64748b"})=><text x={x} y={y} textAnchor="middle" fontSize={8} fill={c} fontWeight="500">{t}</text>;
+  const Pert=({x,y})=>pertOn?<g><Sp x={x} y={y} c="#f97316"/><Ar x1={x} y1={y-28} x2={x} y2={y-8} c="#f97316"/><Lb x={x+16} y={y-22} t="d(t)" c="#f97316"/></g>:null;
+  const Noise=({x,y})=>noiseOn?<g><Sp x={x} y={y} c="#f59e0b"/><Ar x1={x} y1={y+25} x2={x} y2={y+8} c="#f59e0b"/><Lb x={x+16} y={y+23} t="n(t)" c="#f59e0b"/></g>:null;
+
+  if(type==="ol"){const cy=40;return<svg viewBox={`0 0 ${W} ${pertOn?80:70}`} style={{width:"100%"}}><Lb x={50} y={15} t="Display Open Loop" c="#475569"/><Lb x={110} y={cy-3} t="Ve"/>
+    <Ar x1={125} y1={cy} x2={175} y2={cy}/><B x={230} y={cy} w={95} h={36} label="G(s) 2nd" sub={`K=${K}, ζ=${zeta}`} fill="#dbeafe" stroke="#2563eb"/>
+    {pertOn?<><Ar x1={272} y1={cy} x2={310} y2={cy}/><Pert x={320} y={cy}/><Ar x1={330} y1={cy} x2={380} y2={cy}/><Lb x={398} y={cy-3} t="Vs"/></>
+    :<><Ar x1={272} y1={cy} x2={340} y2={cy}/><Lb x={355} y={cy-3} t="Vs"/></>}
+  </svg>;}
+
+  if(type==="cont"){const cy=50,hh=pertOn||noiseOn?115:100;return<svg viewBox={`0 0 ${W} ${hh}`} style={{width:"100%"}}><Lb x={50} y={12} t="Closed Loop Continuous" c="#2563eb"/>
+    <Lb x={30} y={cy-3} t="Vref"/><Ar x1={48} y1={cy} x2={68} y2={cy}/><Sm x={78} y={cy}/><Ar x1={88} y1={cy} x2={130} y2={cy}/>
+    <B x={180} y={cy} w={78} h={30} label={cLbl} sub={Ki>0?`Ti=${Ti}s`:""} fill="#dcfce7" stroke="#059669"/>
+    <Ar x1={219} y1={cy} x2={270} y2={cy}/>
+    <B x={325} y={cy} w={95} h={34} label="G(s) 2nd" sub={`K=${K}, ζ=${zeta}`} fill="#dbeafe" stroke="#2563eb"/>
+    {pertOn?<><Ar x1={367} y1={cy} x2={408} y2={cy}/><Pert x={418} y={cy}/><Ar x1={428} y1={cy} x2={470} y2={cy}/><Dot x={455} y={cy}/><Lb x={488} y={cy-3} t="Vs"/></>
+    :<><Ar x1={367} y1={cy} x2={470} y2={cy}/><Dot x={455} y={cy}/><Lb x={488} y={cy-3} t="Vs"/></>}
+    <L x1={455} y1={cy} x2={455} y2={cy+38}/>
+    {noiseOn?<><L x1={455} y1={cy+38} x2={220} y2={cy+38} c="#64748b"/><Noise x={200} y={cy+38}/><L x1={192} y1={cy+38} x2={78} y2={cy+38} c="#64748b"/></>
+    :<L x1={455} y1={cy+38} x2={78} y2={cy+38} c="#64748b"/>}
+    <Ar x1={78} y1={cy+38} x2={78} y2={cy+10} c="#64748b"/>
+  </svg>;}
+
+  if(type==="disc"){const cy=48,hh=pertOn||noiseOn?125:110;return<svg viewBox={`0 0 ${W} ${hh}`} style={{width:"100%"}}><Lb x={50} y={12} t="Closed Loop Discrete" c="#059669"/>
+    <Lb x={20} y={cy-3} t="Vref"/><Ar x1={35} y1={cy} x2={50} y2={cy}/><Sm x={60} y={cy}/><Ar x1={70} y1={cy} x2={105} y2={cy}/>
+    <B x={145} y={cy} w={60} h={26} label="C(z)" sub="Tustin" fill="#dcfce7" stroke="#059669" fs={9}/>
+    <Ar x1={175} y1={cy} x2={205} y2={cy}/><B x={228} y={cy} w={38} h={22} label="ZOH" fill="#fef9c3" stroke="#a16207" fs={9}/>
+    <Ar x1={247} y1={cy} x2={280} y2={cy}/><B x={330} y={cy} w={90} h={30} label="G(s) 2nd" sub={`K=${K}, ζ=${zeta}`} fill="#dbeafe" stroke="#2563eb" fs={9}/>
+    {pertOn?<><Ar x1={370} y1={cy} x2={398} y2={cy}/><Pert x={408} y={cy}/><Ar x1={418} y1={cy} x2={460} y2={cy}/><Dot x={445} y={cy}/><Lb x={478} y={cy-3} t="Vs"/></>
+    :<><Ar x1={370} y1={cy} x2={460} y2={cy}/><Dot x={445} y={cy}/><Lb x={478} y={cy-3} t="Vs"/></>}
+    <L x1={445} y1={cy} x2={445} y2={cy+40}/>
+    <B x={350} y={cy+40} w={38} h={20} label="ADC" fill="#fef9c3" stroke="#a16207" fs={8}/>
+    <Ar x1={445} y1={cy+40} x2={369} y2={cy+40} c="#64748b"/>
+    {noiseOn?<><Ar x1={331} y1={cy+40} x2={220} y2={cy+40} c="#64748b"/><Noise x={200} y={cy+40}/><L x1={192} y1={cy+40} x2={60} y2={cy+40} c="#64748b"/></>
+    :<Ar x1={331} y1={cy+40} x2={60} y2={cy+40} c="#64748b"/>}
+    <Ar x1={60} y1={cy+40} x2={60} y2={cy+10} c="#64748b"/>
+    <Lb x={540} y={cy+42} t={`Te=${(Te*1e3).toFixed(1)}ms`} c="#059669"/>
+  </svg>;}
+
+  if(type==="delay"){const cy=48,hh=pertOn||noiseOn?125:110;return<svg viewBox={`0 0 ${W} ${hh}`} style={{width:"100%"}}><Lb x={55} y={12} t="Closed Loop + Delay" c="#dc2626"/>
+    <Lb x={16} y={cy-3} t="Vref"/><Ar x1={30} y1={cy} x2={42} y2={cy}/><Sm x={52} y={cy}/><Ar x1={62} y1={cy} x2={88} y2={cy}/>
+    <B x={118} y={cy} w={46} h={24} label="C(z)" fill="#dcfce7" stroke="#059669" fs={9}/>
+    <Ar x1={141} y1={cy} x2={168} y2={cy}/><B x={190} y={cy} w={32} h={20} label="ZOH" fill="#fef9c3" stroke="#a16207" fs={8}/>
+    <Ar x1={206} y1={cy} x2={235} y2={cy}/><B x={278} y={cy} w={62} h={26} label="e⁻ᵀʳˢ" sub={`${(Tr*1e3).toFixed(0)}ms`} fill="#fee2e2" stroke="#dc2626"/>
+    <Ar x1={309} y1={cy} x2={345} y2={cy}/><B x={395} y={cy} w={86} h={30} label="G(s) 2nd" sub={`K=${K}, ζ=${zeta}`} fill="#dbeafe" stroke="#2563eb" fs={9}/>
+    {pertOn?<><Ar x1={433} y1={cy} x2={462} y2={cy}/><Pert x={472} y={cy}/><Ar x1={482} y1={cy} x2={525} y2={cy}/><Dot x={510} y={cy}/><Lb x={543} y={cy-3} t="Vs"/></>
+    :<><Ar x1={433} y1={cy} x2={525} y2={cy}/><Dot x={510} y={cy}/><Lb x={543} y={cy-3} t="Vs"/></>}
+    <L x1={510} y1={cy} x2={510} y2={cy+40}/>
+    <B x={390} y={cy+40} w={38} h={20} label="ADC" fill="#fef9c3" stroke="#a16207" fs={8}/>
+    <Ar x1={510} y1={cy+40} x2={409} y2={cy+40} c="#64748b"/>
+    {noiseOn?<><Ar x1={371} y1={cy+40} x2={220} y2={cy+40} c="#64748b"/><Noise x={200} y={cy+40}/><L x1={192} y1={cy+40} x2={52} y2={cy+40} c="#64748b"/></>
+    :<Ar x1={371} y1={cy+40} x2={52} y2={cy+40} c="#64748b"/>}
+    <Ar x1={52} y1={cy+40} x2={52} y2={cy+10} c="#64748b"/>
+  </svg>;}
+
+  if(type==="smith"){const cy=42,cy2=108,cy3=145,cy4=175;return<svg viewBox={`0 0 ${W} 200`} style={{width:"100%"}}><Lb x={65} y={12} t="Enable Smith Predictor" c="#7c3aed"/>
+    <Lb x={14} y={cy-3} t="Vref"/><Ar x1={28} y1={cy} x2={40} y2={cy}/><Sm x={50} y={cy}/><Ar x1={60} y1={cy} x2={75} y2={cy}/><Sm x={85} y={cy}/>
+    <Ar x1={95} y1={cy} x2={125} y2={cy}/><B x={158} y={cy} w={48} h={24} label="C(z)" fill="#dcfce7" stroke="#059669" fs={9}/>
+    <Ar x1={182} y1={cy} x2={215} y2={cy}/><Dot x={200} y={cy}/><B x={240} y={cy} w={32} h={20} label="ZOH" fill="#fef9c3" stroke="#a16207" fs={8}/>
+    <Ar x1={256} y1={cy} x2={285} y2={cy}/><B x={325} y={cy} w={58} h={24} label="e⁻ᵀʳˢ" fill="#fee2e2" stroke="#dc2626" fs={9}/>
+    <Ar x1={354} y1={cy} x2={390} y2={cy}/><B x={435} y={cy} w={78} h={28} label="G(s) 2nd" sub={`K=${K}, ζ=${zeta}`} fill="#dbeafe" stroke="#2563eb" fs={9}/>
+    {pertOn?<><Ar x1={469} y1={cy} x2={498} y2={cy}/><Sp x={508} y={cy} c="#f97316"/><Ar x1={508} y1={cy-25} x2={508} y2={cy-8} c="#f97316"/><Lb x={524} y={cy-18} t="d(t)" c="#f97316"/><Ar x1={518} y1={cy} x2={548} y2={cy}/><Dot x={535} y={cy}/><Lb x={560} y={cy-3} t="Vs"/></>
+    :<><Ar x1={469} y1={cy} x2={548} y2={cy}/><Dot x={535} y={cy}/><Lb x={560} y={cy-3} t="Vs"/></>}
+    <L x1={535} y1={cy} x2={535} y2={cy-28}/>
+    <B x={460} y={cy-28} w={36} h={18} label="ADC" fill="#fef9c3" stroke="#a16207" fs={8}/>
+    <L x1={535} y1={cy-28} x2={478} y2={cy-28} stroke="#64748b"/>
+    {noiseOn?<><Ar x1={442} y1={cy-28} x2={350} y2={cy-28} c="#64748b"/><Sp x={335} y={cy-28} c="#f59e0b"/><Ar x1={335} y1={cy-5} x2={335} y2={cy-20} c="#f59e0b"/><Lb x={318} y={cy-7} t="n(t)" c="#f59e0b"/><Ar x1={327} y1={cy-28} x2={50} y2={cy-28} c="#64748b"/></>
+    :<Ar x1={442} y1={cy-28} x2={50} y2={cy-28} c="#64748b"/>}
+    <Ar x1={50} y1={cy-28} x2={50} y2={cy-10} c="#64748b"/>
+    <L x1={200} y1={cy} x2={200} y2={cy2} stroke="#7c3aed"/><Ar x1={200} y1={cy2} x2={235} y2={cy2} c="#7c3aed"/>
+    <B x={278} y={cy2} w={62} h={22} label="Gm(s)" fill="#f3e8ff" stroke="#7c3aed" fs={9}/>
+    <Ar x1={309} y1={cy2} x2={350} y2={cy2} c="#7c3aed"/><Dot x={335} y={cy2}/>
+    <L x1={350} y1={cy2} x2={375} y2={cy2} stroke="#7c3aed"/><L x1={375} y1={cy2} x2={375} y2={cy4} stroke="#7c3aed"/>
+    <L x1={375} y1={cy4} x2={95} y2={cy4} stroke="#7c3aed"/><Ar x1={95} y1={cy4} x2={95} y2={cy4-12} c="#7c3aed"/>
+    <L x1={335} y1={cy2} x2={335} y2={cy3} stroke="#7c3aed"/><Ar x1={335} y1={cy3} x2={398} y2={cy3} c="#7c3aed"/>
+    <B x={435} y={cy3} w={55} h={20} label="e⁻ᵀʳᵐˢ" fill="#fae8ff" stroke="#7c3aed" fs={8}/>
+    <L x1={462} y1={cy3} x2={505} y2={cy3} stroke="#7c3aed"/><L x1={505} y1={cy3} x2={505} y2={cy4+18} stroke="#7c3aed"/>
+    <L x1={505} y1={cy4+18} x2={80} y2={cy4+18} stroke="#7c3aed"/><Ar x1={80} y1={cy4+18} x2={80} y2={cy4-1} c="#7c3aed"/>
+    <g><circle cx={87} cy={cy4-12} r={8} fill="#fff" stroke="#7c3aed" strokeWidth={1.3}/>
+      <text x={87} y={cy4-11} textAnchor="middle" fontSize={10} fontWeight="bold" fill="#7c3aed">{"Σ"}</text>
+      <text x={80} y={cy4-17} fontSize={6} fill="#059669">+</text><text x={92} y={cy4-6} fontSize={6} fill="#dc2626">{"−"}</text>
+    </g>
+    <L x1={87} y1={cy4-20} x2={87} y2={cy+18} stroke="#7c3aed"/><Ar x1={87} y1={cy+18} x2={85} y2={cy+10} c="#7c3aed"/>
+    <Lb x={310} y={cy4-2} t="ŷ no delay (+)" c="#7c3aed"/><Lb x={310} y={cy4+14} t="ŷ with delay (−)" c="#7c3aed"/>
+    <rect x={185} y={cy+14} width={340} height={cy4-cy+17} rx={5} fill="none" stroke="#7c3aed" strokeWidth={1} strokeDasharray="5,3" opacity={.4}/>
+    <Lb x={360} y={cy+23} t="Internal Model (Smith)" c="#7c3aed"/>
+  </svg>;}
+  return null;
+}
+
+/* ─── MAIN ─── */
+function App(){
+  const [K,setK]=useState(.1),[tau,setTau]=useState(.02),[zeta,setZeta]=useState(0.7);
+  const [Te,setTe]=useState(.001),[Tr,setTr]=useState(.05);
+  const [sErr,setSErr]=useState(0);
+  const [amp,setAmp]=useState(0.3);
+  const [specTr,setSpecTr]=useState(100); // desired tr5% in ms
+  const [specDp,setSpecDp]=useState(20); // desired D% in %
+  const [noiseOn,setNoiseOn]=useState(false);
+  const [noiseAmp,setNoiseAmp]=useState(0.005);
+  const [pertOn,setPertOn]=useState(false);
+  const [pertAmp,setPertAmp]=useState(0.1);
+  const [pertTime,setPertTime]=useState(150);
+  // Saturation for continuous controllers
+  const [satPc,setSatPc]=useState({on:false,v:5});
+  const [satPIc,setSatPIc]=useState({on:false,v:5});
+  const [satPIDc,setSatPIDc]=useState({on:false,v:5});
+  const [satPd,setSatPd]=useState({on:false,v:5});
+  const [satPId,setSatPId]=useState({on:false,v:5});
+  const [satPIDd,setSatPIDd]=useState({on:false,v:5});
+  // Per-controller, per-domain params
+  const [pc,setPc]=useState({Kp:10}); // P continuous
+  const [pd,setPd]=useState({Kp:10}); // P discrete
+  const [pic,setPic]=useState({Kp:2,Ti:.02}); // PI continuous
+  const [pid_,setPid]=useState({Kp:2,Ti:.02}); // PI discrete
+  const [pidc,setPidc]=useState({Kp:2,Ti:.02,Td:.001}); // PID continuous
+  const [pidd,setPidd]=useState({Kp:2,Ti:.02,Td:.001}); // PID discrete
+  const [filtC,setFiltC]=useState({on:false,N:10}); // derivative filter continuous
+  const [filtD,setFiltD]=useState({on:false,N:10}); // derivative filter discrete
+  // Visibility
+  const [sh,setSh]=useState({ol:true,pc:false,pic:true,pidc:false,pd:false,pid:true,pidd:false,pdl:false,pidl:false,piddl:false,psm:false,pism:false,pidsm:false});
+  const tg=k=>setSh(s=>({...s,[k]:!s[k]}));
+  const smith=sh.psm||sh.pism||sh.pidsm;
+  const [tab,setTab]=useState("cont");
+  const [xLo,setXLo]=useState(-20); // ms
+  const [xHi,setXHi]=useState(300); // ms
+  const [yLo,setYLo]=useState(-0.05);
+  const [yHi,setYHi]=useState(0.5);
+  const [uLo,setULo]=useState(-1);
+  const [uHi,setUHi]=useState(5); // which controller the pole map controls
+
+  const optKp=3*tau/(.1*K);const optTi=tau;const optTd=tau/10;
+  const kiOf=(Kp,Ti)=>Ti>0?Kp/Ti:0;
+  const tiInfo=Ti=>Ti>0?`ωi=${(1/Ti).toFixed(1)} rad/s, fi=${(1/(Ti*2*Math.PI)).toFixed(1)} Hz`:"(pure P)";
+  const Km=K*(1+sErr/100),taum=tau*(1+sErr/100),zetam=zeta*(1+sErr/100),Trm=Tr*(1+sErr/100);
+  const tMax=Math.max(.3,Te*60,Tr*6,tau*15,xHi/1000*1.1),st=0,dt=.0002;
+
+  const R=useMemo(()=>{
+    const cfgs=[
+      {k:"ol",Kp:0,Ki:0,Kd:0,disc:false,delay:false,ol:true,uSat:0},
+      {k:"pc",Kp:pc.Kp,Ki:0,Kd:0,disc:false,delay:false,uSat:satPc.on?satPc.v:0},
+      {k:"pic",Kp:pic.Kp,Ki:kiOf(pic.Kp,pic.Ti),Kd:0,disc:false,delay:false,uSat:satPIc.on?satPIc.v:0},
+      {k:"pidc",Kp:pidc.Kp,Ki:kiOf(pidc.Kp,pidc.Ti),Kd:pidc.Kp*(pidc.Td||0),Td:pidc.Td,disc:false,delay:false,uSat:satPIDc.on?satPIDc.v:0,filtN:filtC.on?filtC.N:0},
+      {k:"pd",Kp:pd.Kp,Ki:0,Kd:0,disc:true,delay:false,uSat:satPd.on?satPd.v:0},
+      {k:"pid",Kp:pid_.Kp,Ki:kiOf(pid_.Kp,pid_.Ti),Kd:0,disc:true,delay:false,uSat:satPId.on?satPId.v:0},
+      {k:"pidd",Kp:pidd.Kp,Ki:kiOf(pidd.Kp,pidd.Ti),Kd:pidd.Kp*(pidd.Td||0),Td:pidd.Td,disc:true,delay:false,uSat:satPIDd.on?satPIDd.v:0,filtN:filtD.on?filtD.N:0},
+      {k:"pdl",Kp:pd.Kp,Ki:0,Kd:0,disc:true,delay:true,uSat:satPd.on?satPd.v:0},
+      {k:"pidl",Kp:pid_.Kp,Ki:kiOf(pid_.Kp,pid_.Ti),Kd:0,disc:true,delay:true,uSat:satPId.on?satPId.v:0},
+      {k:"piddl",Kp:pidd.Kp,Ki:kiOf(pidd.Kp,pidd.Ti),Kd:pidd.Kp*(pidd.Td||0),Td:pidd.Td,disc:true,delay:true,uSat:satPIDd.on?satPIDd.v:0,filtN:filtD.on?filtD.N:0},
+      {k:"psm",Kp:pd.Kp,Ki:0,Kd:0,disc:true,delay:true,uSat:satPd.on?satPd.v:0},
+      {k:"pism",Kp:pid_.Kp,Ki:kiOf(pid_.Kp,pid_.Ti),Kd:0,disc:true,delay:true,uSat:satPId.on?satPId.v:0},
+      {k:"pidsm",Kp:pidd.Kp,Ki:kiOf(pidd.Kp,pidd.Ti),Kd:pidd.Kp*(pidd.Td||0),Td:pidd.Td,disc:true,delay:true,uSat:satPIDd.on?satPIDd.v:0,filtN:filtD.on?filtD.N:0},
+    ];
+    const r={};
+    cfgs.forEach(c=>{
+      if(c.k!=="ol"&&!sh[c.k])return;
+      const isSm=c.k.endsWith("sm");
+      r[c.k]=sim({K,tau,zeta,Kp:c.Kp,Ki:c.Ki,Kd:c.Kd,Td:c.Td||0,Te,Tr:c.delay?Tr:0,smith:isSm&&smith,Km,taum,zetam,Trm,dt,tMax,st,disc:c.disc,delay:c.delay,ol:c.ol||false,amp,uSat:c.uSat,noiseAmp:noiseOn?noiseAmp:0,pertAmp:pertOn?pertAmp:0,pertTime,filtN:c.filtN||0});
+    });
+    return r;
+  },[K,tau,zeta,Te,Tr,smith,sErr,pc,pd,pic,pid_,pidc,pidd,tMax,sh,amp,satPc,satPIc,satPIDc,satPd,satPId,satPIDd,noiseOn,noiseAmp,pertOn,pertAmp,pertTime,filtC,filtD]);
+
+  const olD=R.ol||{t:[],y:[]};
+  const cD=olD.t.map((t,i)=>({t,c:t>=st*1000?amp:0}));
+  const TD=[
+    {k:"ol",label:"OL",color:"#94a3b8",dash:"4,3",w:1.5},
+    {k:"pc",label:"P cont",color:"#93c5fd",dash:"5,3",w:1.5},
+    {k:"pic",label:"PI cont",color:"#2563eb",w:2.5},
+    {k:"pidc",label:"PID cont",color:"#1e3a5f",dash:"8,2",w:2},
+    {k:"pd",label:"P disc",color:"#6ee7b7",dash:"5,3",w:1.5},
+    {k:"pid",label:"PI disc",color:"#059669",w:2},
+    {k:"pidd",label:"PID disc",color:"#064e3b",dash:"8,2",w:2},
+    {k:"pdl",label:"P+delay",color:"#fca5a5",dash:"5,3",w:1.5},
+    {k:"pidl",label:"PI+delay",color:"#dc2626",w:2},
+    {k:"piddl",label:"PID+delay",color:"#7f1d1d",dash:"8,2",w:2},
+    {k:"psm",label:"P+Smith",color:"#d8b4fe",dash:"5,3",w:1.5},
+    {k:"pism",label:"PI+Smith",color:"#7c3aed",w:2},
+    {k:"pidsm",label:"PID+Smith",color:"#4c1d95",dash:"8,2",w:2},
+  ];
+  const traces=TD.map(t=>({...t,s:sh[t.k],y:R[t.k]?.y||[]}));
+  const cmdTraces=TD.filter(t=>t.k!=="ol").map(t=>({...t,s:sh[t.k],y:R[t.k]?.u||[]}));
+
+  // Pole placement handler
+  // For 2nd order P: s²+2ζωns+ωn²(1+KKp)=0 → product of roots = ωn²(1+KKp) = σ²+ω²
+  const handlePoleP=(pt,isZ)=>{
+    const wn=1/tau;
+    if(!isZ){const kp=(pt.re*pt.re+pt.im*pt.im-wn*wn)/(K*wn*wn);if(kp>0){setPc({Kp:parseFloat(kp.toPrecision(3))});setPd({Kp:parseFloat(kp.toPrecision(3))});}}
+    else{const m=Math.sqrt(pt.re*pt.re+pt.im*pt.im);const sRe=-Math.log(m)/Te;const sIm=pt.im>=0?Math.atan2(pt.im,pt.re)/Te:-Math.atan2(-pt.im,pt.re)/Te;
+      const kp=(sRe*sRe+sIm*sIm-wn*wn)/(K*wn*wn);if(kp>0){setPc({Kp:parseFloat(kp.toPrecision(3))});setPd({Kp:parseFloat(kp.toPrecision(3))});}}
+  };
+  const handlePolePI=(pt,isZ)=>{
+    const wn=1/tau;const Ti=pic.Ti;
+    if(!isZ){const kp=Math.max(0.1,(pt.re*pt.re+pt.im*pt.im-wn*wn)/(K*wn*wn));
+      setPic({Kp:parseFloat(kp.toPrecision(3)),Ti});setPid({Kp:parseFloat(kp.toPrecision(3)),Ti});}
+    else{const m=Math.sqrt(pt.re*pt.re+pt.im*pt.im);const sRe=-Math.log(Math.max(m,0.01))/Te;const sIm=Math.atan2(Math.abs(pt.im),pt.re)/Te;
+      const kp=Math.max(0.1,(sRe*sRe+sIm*sIm-wn*wn)/(K*wn*wn));
+      setPic({Kp:parseFloat(kp.toPrecision(3)),Ti});setPid({Kp:parseFloat(kp.toPrecision(3)),Ti});}
+  };
+  const handlePolePID=(pt,isZ)=>{
+    const wn=1/tau;const Ti=pidc.Ti,Td=pidc.Td;
+    if(!isZ){const kp=Math.max(0.1,(pt.re*pt.re+pt.im*pt.im-wn*wn)/(K*wn*wn));
+      setPidc({Kp:parseFloat(kp.toPrecision(3)),Ti,Td});setPidd({Kp:parseFloat(kp.toPrecision(3)),Ti,Td});}
+    else{const m=Math.sqrt(pt.re*pt.re+pt.im*pt.im);const sRe=-Math.log(Math.max(m,0.01))/Te;const sIm=Math.atan2(Math.abs(pt.im),pt.re)/Te;
+      const kp=Math.max(0.1,(sRe*sRe+sIm*sIm-wn*wn)/(K*wn*wn));
+      setPidc({Kp:parseFloat(kp.toPrecision(3)),Ti,Td});setPidd({Kp:parseFloat(kp.toPrecision(3)),Ti,Td});}
+  };
+
+  const isZ=tab==="disc"||tab==="delay"||tab==="smith";
+  const poleData=useMemo(()=>{
+    const z=isZ;
+    return{
+      p:computePoles({K,tau,zeta,Kp:isZ?pd.Kp:pc.Kp,Ki:0,Kd:0,Te,isZ:z}),
+      pi:computePoles({K,tau,zeta,Kp:isZ?pid_.Kp:pic.Kp,Ki:kiOf(isZ?pid_.Kp:pic.Kp,isZ?pid_.Ti:pic.Ti),Kd:0,Te,isZ:z}),
+      pid:computePoles({K,tau,zeta,Kp:isZ?pidd.Kp:pidc.Kp,Ki:kiOf(isZ?pidd.Kp:pidc.Kp,isZ?pidd.Ti:pidc.Ti),Kd:(isZ?pidd.Kp:pidc.Kp)*((isZ?pidd.Td:pidc.Td)||0),Te,isZ:z}),
+    };
+  },[K,tau,zeta,pc,pd,pic,pid_,pidc,pidd,Te,isZ]);
+
+  // Performance metrics: tr5% and D% for each active trace
+  const calcM=useCallback((key)=>{
+    const d=R[key];if(!d||!d.y||d.y.length<5)return{tr5:"—",dp:"—"};
+    const si=d.t.findIndex(t=>t>=0);if(si<0)return{tr5:"—",dp:"—"};
+    const v=d.y.slice(si),tv=d.t.slice(si);
+    const yF=v[v.length-1]||0,yM=Math.max(...v);
+    const dp=Math.abs(yF)>0.001?Math.round((yM-yF)/Math.abs(yF)*100):0;
+    const idx=v.findIndex((_,i)=>i>1&&v.slice(i).every(r=>Math.abs(r-yF)<0.05*Math.abs(yF)));
+    const tr5=idx>0?Math.round(tv[idx]-tv[si]):"—";
+    return{tr5:tr5==="—"?"—":tr5,dp};
+  },[R]);
+
+  const metrics=useMemo(()=>{
+    const keys=["pc","pic","pidc","pd","pid","pidd","pdl","pidl","piddl","psm","pism","pidsm"];
+    const m={};keys.forEach(k=>{if(sh[k])m[k]=calcM(k);});
+    return m;
+  },[R,sh,calcM]);
+
+  const teS=tau/Te>=10?{t:"✓",c:"#059669"}:tau/Te>=2?{t:"⚠",c:"#d97706"}:{t:"✗",c:"#dc2626"};
+
+  const panel=(bg,bl)=>({background:bg,borderRadius:6,padding:"6px 8px",marginBottom:6,border:`1px solid #e2e8f0`,borderLeft:`3px solid ${bl}`});
+
+  return(
+    <div style={{maxWidth:1200,margin:"0 auto",padding:"6px 10px"}}>
+      <div style={{textAlign:"center",marginBottom:8,padding:"6px 0",borderBottom:"3px solid #2563eb"}}>
+        <h1 style={{fontSize:16,fontWeight:800,color:"#0f172a",margin:0}}>Numerical Control Simulator — 2nd Order Systems</h1>
+        <div style={{fontSize:9,color:"#64748b"}}>G(s)=Kωn²/(s²+2ζωns+ωn²) • P/PI/PID • Continuous & Discrete (Tustin) • Smith Predictor</div>
+        <div style={{fontSize:8,color:"#94a3b8",marginTop:1}}>YH — assisted by Claude Code</div>
+      </div>
+      <div style={{background:"#fff7ed",border:"2px solid #f97316",borderRadius:6,padding:"6px 12px",marginBottom:8,textAlign:"center"}}>
+        <span style={{fontSize:12,fontWeight:700,color:"#c2410c"}}>⚠ Linearized model around an operating point — All displayed quantities are deviations from equilibrium</span>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        {/* ═══ LEFT ═══ */}
+        <div style={{width:275,flexShrink:0,maxHeight:"calc(100vh - 60px)",overflowY:"auto"}}>
+          {/* Plant */}
+          <div className="pn"><h4 style={{color:"#2563eb"}}>① Plant — G(s) = Kωn²/(s²+2ζωns+ωn²)</h4>
+            <LS label="K (DC gain)" value={K} min={.01} max={5} onChange={setK} unit="V/V" color="#2563eb"/>
+            <LS label="τ = 1/ωn" value={tau} min={.001} max={1} onChange={setTau} unit="s" color="#2563eb" extra={`ωn = ${(1/tau).toFixed(1)} rad/s, fn = ${(1/(tau*2*Math.PI)).toFixed(1)} Hz`}/>
+            <SS label="ζ (damping)" value={zeta} min={0.01} max={3} step={0.01} onChange={setZeta} color="#2563eb" extra={zeta<1?"underdamped":zeta===1?"critically damped":"overdamped"}/>
+            <LS label="Step Amplitude" value={amp} min={0.005} max={2} onChange={setAmp} unit="V" color="#475569"/>
+            <TG label="Add Measurement Noise" checked={noiseOn} onChange={setNoiseOn} color="#f59e0b"/>
+            {noiseOn&&<LS label="Noise σ" value={noiseAmp} min={0.0001} max={0.1} onChange={setNoiseAmp} unit="V rms" color="#f59e0b"/>}
+            <TG label="Add Step Disturbance" checked={pertOn} onChange={setPertOn} color="#f97316"/>
+            {pertOn&&<>
+              <SS label="Disturbance Ampl." value={pertAmp} min={-0.5} max={0.5} step={0.01} onChange={setPertAmp} unit="V" color="#f97316"/>
+              <SS label="Disturbance Time" value={pertTime} min={10} max={2000} step={10} onChange={setPertTime} unit="ms" color="#f97316"/>
+            </>}
+            <TG label="Display Open Loop" checked={sh.ol} onChange={()=>tg("ol")} color="#94a3b8"/>
+          </div>
+
+          {/* ── SPECIFICATIONS ── */}
+          <div className="pn" style={{background:"#fefce8",borderColor:"#fde68a"}}><h4 style={{color:"#92400e"}}>Specifications (Target)</h4>
+            <SS label="Desired tr5%" value={specTr} min={5} max={1000} step={5} onChange={setSpecTr} unit="ms" color="#b45309"/>
+            <SS label="Desired D%" value={specDp} min={0} max={100} step={1} onChange={setSpecDp} unit="%" color="#b45309"/>
+          </div>
+
+          {/* ── CONTINU ── */}
+          <div style={{fontSize:9,fontWeight:800,color:"#2563eb",textTransform:"uppercase",letterSpacing:1,padding:"4px 0 2px",borderBottom:"2px solid #2563eb",marginBottom:4}}>Continuous Controllers</div>
+
+          <div style={panel("#f8fafc","#93c5fd")}><h4 style={{color:"#3b82f6"}}>P Continuous</h4>
+            <TG label="Display P Continuous" checked={sh.pc} onChange={()=>tg("pc")} color="#93c5fd"/>
+            <LS label="Kp" value={pc.Kp} min={optKp/100} max={optKp*100} onChange={v=>setPc({Kp:v})} color="#3b82f6"/>
+            <TG label="Enable Saturation" checked={satPc.on} onChange={v=>setSatPc({...satPc,on:v})} color="#dc2626"/>
+            {satPc.on&&<SS label="u_max" value={satPc.v} min={0.01} max={5} step={0.01} onChange={v=>setSatPc({...satPc,v})} unit="V" color="#dc2626"/>}
+          </div>
+
+          <div style={panel("#f8fafc","#059669")}><h4 style={{color:"#059669"}}>PI Continuous</h4>
+            <TG label="Display PI Continuous" checked={sh.pic} onChange={()=>tg("pic")} color="#2563eb"/>
+            <LS label="Kp" value={pic.Kp} min={optKp/100} max={optKp*100} onChange={v=>setPic({...pic,Kp:v})} color="#2563eb"/>
+            <LS label="Ti" value={pic.Ti} min={optTi/100} max={optTi*100} onChange={v=>setPic({...pic,Ti:v})} unit="s" color="#2563eb" extra={tiInfo(pic.Ti)}/>
+            <TG label="Enable Saturation" checked={satPIc.on} onChange={v=>setSatPIc({...satPIc,on:v})} color="#dc2626"/>
+            {satPIc.on&&<SS label="u_max" value={satPIc.v} min={0.01} max={5} step={0.01} onChange={v=>setSatPIc({...satPIc,v})} unit="V" color="#dc2626"/>}
+          </div>
+
+          <div style={panel("#f8fafc","#1d4ed8")}><h4 style={{color:"#1d4ed8"}}>PID Continuous</h4>
+            <TG label="Display PID Continuous" checked={sh.pidc} onChange={()=>tg("pidc")} color="#1e3a5f"/>
+            <LS label="Kp" value={pidc.Kp} min={optKp/100} max={optKp*100} onChange={v=>setPidc({...pidc,Kp:v})} color="#1d4ed8"/>
+            <LS label="Ti" value={pidc.Ti} min={optTi/100} max={optTi*100} onChange={v=>setPidc({...pidc,Ti:v})} unit="s" color="#1d4ed8" extra={tiInfo(pidc.Ti)}/>
+            <LS label="Td" value={pidc.Td} min={(optTd||.0001)/100} max={(optTd||.0001)*100} onChange={v=>setPidc({...pidc,Td:v})} unit="s" color="#1d4ed8" extra={`ωd=${(1/(pidc.Td||1)).toFixed(0)} rad/s`}/>
+            <TG label="Derivative Filter (N)" checked={filtC.on} onChange={v=>setFiltC({...filtC,on:v})} color="#8b5cf6"/>
+            {filtC.on&&<LS label="N" value={filtC.N} min={2} max={100} onChange={v=>setFiltC({...filtC,N:parseFloat(v.toPrecision(3))})} color="#8b5cf6" extra={`fc = N/Td = ${(filtC.N/(pidc.Td||.001)).toFixed(0)} rad/s`}/>}
+            <TG label="Enable Saturation" checked={satPIDc.on} onChange={v=>setSatPIDc({...satPIDc,on:v})} color="#dc2626"/>
+            {satPIDc.on&&<SS label="u_max" value={satPIDc.v} min={0.01} max={5} step={0.01} onChange={v=>setSatPIDc({...satPIDc,v})} unit="V" color="#dc2626"/>}
+          </div>
+
+          {/* ── SAMPLING ── */}
+          <div className="pn" style={{background:"#f0fdf4",borderColor:"#bbf7d0"}}><h4 style={{color:"#166534"}}>② Sampling</h4>
+            <LS label="Te" value={Te} min={.0002} max={.2} onChange={setTe} unit="s" color="#059669" extra={<span style={{color:teS.c,fontWeight:700}}>τ/Te={(tau/Te).toFixed(1)} {teS.t}</span>}/>
+          </div>
+
+          {/* ── DISCRET ── */}
+          <div style={{fontSize:9,fontWeight:800,color:"#059669",textTransform:"uppercase",letterSpacing:1,padding:"4px 0 2px",borderBottom:"2px solid #059669",marginBottom:4}}>Discrete Controllers (Te={Te*1e3}ms)</div>
+
+          <div style={panel("#f8fafc","#6ee7b7")}><h4 style={{color:"#10b981"}}>P Discrete</h4>
+            <TG label="Display P Discrete" checked={sh.pd} onChange={()=>tg("pd")} color="#6ee7b7"/>
+            <LS label="Kp" value={pd.Kp} min={optKp/100} max={optKp*100} onChange={v=>setPd({Kp:v})} color="#10b981"/>
+            <TG label="Enable Saturation" checked={satPd.on} onChange={v=>setSatPd({...satPd,on:v})} color="#dc2626"/>
+            {satPd.on&&<SS label="u_max" value={satPd.v} min={0.01} max={5} step={0.01} onChange={v=>setSatPd({...satPd,v})} unit="V" color="#dc2626"/>}
+          </div>
+
+          <div style={panel("#f8fafc","#059669")}><h4 style={{color:"#059669"}}>PI Discrete</h4>
+            <TG label="Display PI Discrete" checked={sh.pid} onChange={()=>tg("pid")} color="#059669"/>
+            <LS label="Kp" value={pid_.Kp} min={optKp/100} max={optKp*100} onChange={v=>setPid({...pid_,Kp:v})} color="#059669"/>
+            <LS label="Ti" value={pid_.Ti} min={optTi/100} max={optTi*100} onChange={v=>setPid({...pid_,Ti:v})} unit="s" color="#059669" extra={tiInfo(pid_.Ti)}/>
+            <TG label="Enable Saturation" checked={satPId.on} onChange={v=>setSatPId({...satPId,on:v})} color="#dc2626"/>
+            {satPId.on&&<SS label="u_max" value={satPId.v} min={0.01} max={5} step={0.01} onChange={v=>setSatPId({...satPId,v})} unit="V" color="#dc2626"/>}
+          </div>
+
+          <div style={panel("#f8fafc","#047857")}><h4 style={{color:"#047857"}}>PID Discrete</h4>
+            <TG label="Display PID Discrete" checked={sh.pidd} onChange={()=>tg("pidd")} color="#064e3b"/>
+            <LS label="Kp" value={pidd.Kp} min={optKp/100} max={optKp*100} onChange={v=>setPidd({...pidd,Kp:v})} color="#047857"/>
+            <LS label="Ti" value={pidd.Ti} min={optTi/100} max={optTi*100} onChange={v=>setPidd({...pidd,Ti:v})} unit="s" color="#047857" extra={tiInfo(pidd.Ti)}/>
+            <LS label="Td" value={pidd.Td} min={(optTd||.0001)/100} max={(optTd||.0001)*100} onChange={v=>setPidd({...pidd,Td:v})} unit="s" color="#047857"/>
+            <TG label="Derivative Filter (N)" checked={filtD.on} onChange={v=>setFiltD({...filtD,on:v})} color="#8b5cf6"/>
+            {filtD.on&&<LS label="N" value={filtD.N} min={2} max={100} onChange={v=>setFiltD({...filtD,N:parseFloat(v.toPrecision(3))})} color="#8b5cf6" extra={`fc = N/Td = ${(filtD.N/(pidd.Td||.001)).toFixed(0)} rad/s`}/>}
+            <TG label="Enable Saturation" checked={satPIDd.on} onChange={v=>setSatPIDd({...satPIDd,on:v})} color="#dc2626"/>
+            {satPIDd.on&&<SS label="u_max" value={satPIDd.v} min={0.01} max={5} step={0.01} onChange={v=>setSatPIDd({...satPIDd,v})} unit="V" color="#dc2626"/>}
+          </div>
+
+          {/* ── RETARD + SMITH ── */}
+          <div className="pn" style={{background:"#fef2f2",borderColor:"#fecaca"}}><h4 style={{color:"#991b1b"}}>③ Delay & Smith</h4>
+            <LS label="Tr (delay)" value={Tr} min={.001} max={1} onChange={setTr} unit="s" color="#dc2626"/>
+            <SS label="Smith Model Error" value={sErr} min={-50} max={50} step={5} onChange={setSErr} unit="%" color="#7c3aed"/>
+          </div>
+
+          <div style={{fontSize:9,fontWeight:800,color:"#dc2626",textTransform:"uppercase",letterSpacing:1,padding:"4px 0 2px",borderBottom:"2px solid #dc2626",marginBottom:4}}>With Delay / Smith</div>
+
+          <div style={panel("#f8fafc","#fca5a5")}><h4 style={{color:"#ef4444"}}>P + Delay / Smith</h4>
+            <TG label="Display P + Delay" checked={sh.pdl} onChange={()=>tg("pdl")} color="#fca5a5"/>
+            <TG label="Display P + Smith" checked={sh.psm} onChange={()=>tg("psm")} color="#d8b4fe"/>
+          </div>
+
+          <div style={panel("#f8fafc","#dc2626")}><h4 style={{color:"#dc2626"}}>PI + Delay / Smith</h4>
+            <TG label="Display PI + Delay" checked={sh.pidl} onChange={()=>tg("pidl")} color="#dc2626"/>
+            <TG label="Display PI + Smith" checked={sh.pism} onChange={()=>tg("pism")} color="#7c3aed"/>
+          </div>
+
+          <div style={panel("#f8fafc","#7f1d1d")}><h4 style={{color:"#7f1d1d"}}>PID + Delay / Smith</h4>
+            <TG label="Display PID + Delay" checked={sh.piddl} onChange={()=>tg("piddl")} color="#7f1d1d"/>
+            <TG label="Display PID + Smith" checked={sh.pidsm} onChange={()=>tg("pidsm")} color="#4c1d95"/>
+          </div>
+        </div>
+
+        {/* ═══ RIGHT ═══ */}
+        <div style={{flex:1,minWidth:380,maxHeight:"calc(100vh - 60px)",overflowY:"auto"}}>
+          <Chart data={cD} traces={traces} title="Step Responses — Performance Monitoring" h={330} xMax={xHi} xMin={xLo} yMin={yLo} yMax={yHi}/>
+          <div style={{display:"flex",gap:6,marginBottom:6,alignItems:"flex-start"}}>
+            <div style={{flex:1}}>
+              <SS label="t min (ms)" value={xLo} min={-500} max={100} step={1} onChange={setXLo} color="#475569"/>
+            </div>
+            <div style={{flex:1}}>
+              <LS label="t max (ms)" value={xHi} min={5} max={5000} onChange={v=>setXHi(Math.round(v))} color="#475569"/>
+            </div>
+            <div style={{flex:1}}>
+              <SS label="Y min" value={yLo} min={-2} max={0.2} step={0.01} onChange={setYLo} color="#475569"/>
+            </div>
+            <div style={{flex:1}}>
+              <LS label="Y max" value={yHi} min={0.01} max={10} onChange={v=>setYHi(parseFloat(v.toPrecision(3)))} color="#475569"/>
+            </div>
+          </div>
+
+          {/* ── Second chart: command signal ── */}
+          <Chart data={cD} traces={cmdTraces} title="Controller Output u(t) — Saturation Monitoring" h={200} xMax={xHi} xMin={xLo} yMin={uLo} yMax={uHi} noConsigne
+            hLines={[{v:0,c:"#dc2626",label:"0V (sat)"},{v:10,c:"#dc2626",label:"10V (sat)"}]}/>
+          <div style={{display:"flex",gap:6,marginBottom:6,alignItems:"flex-start"}}>
+            <div style={{flex:1}}>
+              <SS label="U min" value={uLo} min={-20} max={0} step={0.1} onChange={setULo} color="#dc2626"/>
+            </div>
+            <div style={{flex:1}}>
+              <LS label="U max" value={uHi} min={0.1} max={100} onChange={v=>setUHi(parseFloat(v.toPrecision(3)))} color="#dc2626"/>
+            </div>
+          </div>
+
+          {/* Tabs: schemas + pole maps in each */}
+          <div style={{marginBottom:6}}>
+            <div style={{display:"flex",flexWrap:"wrap"}}>
+              {[{id:"ol",l:"OL"},{id:"cont",l:"CL Cont"},{id:"disc",l:"CL Disc"},{id:"delay",l:"CL+Delay"},{id:"smith",l:"Smith"}].map(t=>
+                <button key={t.id} className={`tb ${tab===t.id?"on":""}`} onClick={()=>setTab(t.id)}>{t.l}</button>
+              )}
+            </div>
+            <div style={{background:"#fff",border:"1px solid #cbd5e1",borderTop:"none",borderRadius:"0 0 6px 6px",padding:8}}>
+              {/* Block diagram */}
+              <BD type={tab} K={K} tau={tau} zeta={zeta} Kp={pic.Kp} Ki={kiOf(pic.Kp,pic.Ti)} Te={Te} Tr={Tr} noiseOn={noiseOn} pertOn={pertOn}/>
+
+              {/* Controller expressions per tab */}
+              {tab==="ol"&&<div style={{borderTop:"1px solid #e2e8f0",marginTop:6,paddingTop:6,fontSize:10}}>
+                <div style={{fontFamily:"monospace",color:"#2563eb"}}>G(s) = K·ωn²/(s²+2ζωns+ωn²) &nbsp;→&nbsp; K={K}, ωn={((1/tau)).toFixed(1)} rad/s, ζ={zeta.toFixed(2)}, τ=1/ωn={tau*1000}ms</div>
+              </div>}
+
+              {tab==="cont"&&<div style={{borderTop:"1px solid #e2e8f0",marginTop:6,paddingTop:6,fontSize:10}}>
+                <div style={{fontWeight:700,marginBottom:4,color:"#475569"}}>Continuous Controllers C(s) :</div>
+                <table style={{width:"100%",borderCollapse:"collapse"}}>
+                  <tbody>
+                    <tr style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"3px 6px",fontWeight:700,color:"#3b82f6",width:35}}>P</td>
+                      <td style={{padding:"3px 6px",fontFamily:"monospace"}}>C(s) = Kp = <b>{pc.Kp.toFixed(2)}</b></td>
+                    </tr>
+                    <tr style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"3px 6px",fontWeight:700,color:"#059669"}}>PI</td>
+                      <td style={{padding:"3px 6px",fontFamily:"monospace"}}>C(s) = <b>{pic.Kp.toFixed(2)}</b> · (1 + 1/(<b>{pic.Ti.toFixed(4)}</b>·s)) &nbsp; <span style={{color:"#64748b"}}>Ki={kiOf(pic.Kp,pic.Ti).toFixed(1)}</span></td>
+                    </tr>
+                    <tr>
+                      <td style={{padding:"3px 6px",fontWeight:700,color:"#1d4ed8"}}>PID</td>
+                      <td style={{padding:"3px 6px",fontFamily:"monospace"}}>C(s) = <b>{pidc.Kp.toFixed(2)}</b> · (1 + 1/(<b>{pidc.Ti.toFixed(4)}</b>·s) + <b>{pidc.Td.toFixed(4)}</b>·s{filtC.on?` / (1+${pidc.Td.toFixed(4)}s/${filtC.N})`:""})
+                        {filtC.on&&<span style={{color:"#8b5cf6"}}> &nbsp;N={filtC.N}</span>}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>}
+
+              {(tab==="disc"||tab==="delay"||tab==="smith")&&(()=>{
+                const piKi=kiOf(pid_.Kp,pid_.Ti),pidKi=kiOf(pidd.Kp,pidd.Ti),pidKd=pidd.Kp*(pidd.Td||0);
+                const pi_b0=pid_.Kp+piKi*Te/2,pi_b1=-pid_.Kp+piKi*Te/2;
+                const pid_b0=pidd.Kp+pidKi*Te/2+2*pidKd/Te,pid_b1=-pidd.Kp+pidKi*Te/2-4*pidKd/Te,pid_b2=2*pidKd/Te;
+                return <div style={{borderTop:"1px solid #e2e8f0",marginTop:6,paddingTop:6,fontSize:10}}>
+                  <div style={{fontWeight:700,marginBottom:4,color:"#475569"}}>
+                    Discrete Controllers C(z) — Tustin (Te = {(Te*1e3).toFixed(1)} ms)
+                    {tab==="delay"&&<span style={{color:"#dc2626"}}> + retard Tr = {(Tr*1e3).toFixed(0)} ms</span>}
+                    {tab==="smith"&&<span style={{color:"#7c3aed"}}> + Smith</span>}
+                     :
+                  </div>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <tbody>
+                      <tr style={{borderBottom:"1px solid #f1f5f9"}}>
+                        <td style={{padding:"3px 6px",fontWeight:700,color:"#10b981",width:35}}>P</td>
+                        <td style={{padding:"3px 6px",fontFamily:"monospace"}}>C(z) = <b>{pd.Kp.toFixed(2)}</b></td>
+                      </tr>
+                      <tr style={{borderBottom:"1px solid #f1f5f9"}}>
+                        <td style={{padding:"3px 6px",fontWeight:700,color:"#059669"}}>PI</td>
+                        <td style={{padding:"3px 6px",fontFamily:"monospace"}}>C(z) = (<b>{pi_b0.toFixed(4)}</b>·z {pi_b1>=0?"+":"−"} <b>{Math.abs(pi_b1).toFixed(4)}</b>) / (z − 1)</td>
+                      </tr>
+                      <tr>
+                        <td style={{padding:"3px 6px",fontWeight:700,color:"#047857"}}>PID</td>
+                        <td style={{padding:"3px 6px",fontFamily:"monospace"}}>
+                          {filtD.on?<>C(z) = PI(z) + Kp·N·(e[k]−xf[k]) <span style={{color:"#8b5cf6"}}>N={filtD.N}, filtré</span></>
+                          :<>C(z) = (<b>{pid_b0.toFixed(3)}</b>·z² {pid_b1>=0?"+":"−"} <b>{Math.abs(pid_b1).toFixed(3)}</b>·z + <b>{pid_b2.toFixed(3)}</b>) / (z² − z)</>}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  {tab==="smith"&&smith&&<div style={{marginTop:4,fontFamily:"monospace",color:"#7c3aed",fontSize:9}}>
+                    Model: Gm(s) 2nd order — Km={((K*(1+sErr/100))).toFixed(3)}, ωnm={((1/(tau*(1+sErr/100)))).toFixed(1)}, ζm={((zeta*(1+sErr/100))).toFixed(2)}, Trm={((Tr*(1+sErr/100)*1000)).toFixed(0)}ms
+                    {sErr!==0&&<span style={{color:"#dc2626"}}> (erreur {sErr>0?"+":""}{sErr}%)</span>}
+                  </div>}
+                </div>;
+              })()}
+
+              {/* Performance metrics */}
+              {(()=>{
+                const tabKeys={
+                  ol:[],
+                  cont:["pc","pic","pidc"].filter(k=>sh[k]),
+                  disc:["pd","pid","pidd"].filter(k=>sh[k]),
+                  delay:["pdl","pidl","piddl"].filter(k=>sh[k]),
+                  smith:["psm","pism","pidsm"].filter(k=>sh[k]),
+                };
+                const labels={pc:"P cont",pic:"PI cont",pidc:"PID cont",pd:"P disc",pid:"PI disc",pidd:"PID disc",pdl:"P+delay",pidl:"PI+delay",piddl:"PID+delay",psm:"P+Smith",pism:"PI+Smith",pidsm:"PID+Smith"};
+                const colors={pc:"#93c5fd",pic:"#2563eb",pidc:"#1e3a5f",pd:"#6ee7b7",pid:"#059669",pidd:"#064e3b",pdl:"#fca5a5",pidl:"#dc2626",piddl:"#7f1d1d",psm:"#d8b4fe",pism:"#7c3aed",pidsm:"#4c1d95"};
+                const rows=tabKeys[tab]||[];
+                if(rows.length===0)return null;
+                return <div style={{borderTop:"1px solid #e2e8f0",marginTop:6,paddingTop:6}}>
+                  <div style={{fontSize:9,fontWeight:700,color:"#475569",marginBottom:3}}>Performance vs Specifications (tr5% ≤ {specTr} ms, D% ≤ {specDp}%)</div>
+                  <table style={{width:"100%",fontSize:9,borderCollapse:"collapse"}}>
+                    <thead><tr style={{borderBottom:"2px solid #e2e8f0"}}>
+                      <th style={{textAlign:"left",padding:"3px 4px"}}>Controller</th>
+                      <th style={{textAlign:"center",padding:"3px 4px"}}>tr5%</th>
+                      <th style={{textAlign:"center",padding:"3px 4px"}}>D%</th>
+                      <th style={{textAlign:"center",padding:"3px 4px"}}>ε stat</th>
+                      <th style={{textAlign:"center",padding:"3px 4px"}}>Specs</th>
+                    </tr></thead>
+                    <tbody>{rows.map(k=>{
+                      const m=metrics[k];if(!m)return null;
+                      const isP=k==="pc"||k==="pd"||k==="pdl"||k==="psm";
+                      const tr5ok=typeof m.tr5==="number"&&m.tr5<=specTr;
+                      const dpok=typeof m.dp==="number"&&m.dp<=specDp;
+                      const ok=tr5ok&&dpok&&!isP;
+                      return <tr key={k} style={{borderBottom:"1px solid #f1f5f9"}}>
+                        <td style={{padding:"3px 4px",fontWeight:600,color:colors[k]}}>● {labels[k]}</td>
+                        <td style={{textAlign:"center",padding:"3px 4px",fontFamily:"monospace",fontWeight:600,color:tr5ok?"#059669":"#dc2626"}}>{typeof m.tr5==="number"?m.tr5+" ms":"—"}</td>
+                        <td style={{textAlign:"center",padding:"3px 4px",fontFamily:"monospace",fontWeight:600,color:dpok?"#059669":"#dc2626"}}>{typeof m.dp==="number"?m.dp+"%":"—"}</td>
+                        <td style={{textAlign:"center",padding:"3px 4px",fontSize:9,color:isP?"#dc2626":"#059669",fontWeight:600}}>{isP?"≠ 0":"= 0"}</td>
+                        <td style={{textAlign:"center",padding:"3px 4px",fontSize:12}}>{ok?"✅":"❌"}</td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                </div>;
+              })()}
+
+              {/* Pole maps */}
+              <div style={{borderTop:"1px solid #e2e8f0",marginTop:6,paddingTop:6}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                  <span style={{fontSize:9,fontWeight:700,color:"#475569"}}>Pole Map — {isZ?"z-plane (discrete)":"s-plane (continuous)"}</span>
+                </div>
+                <div style={{display:"flex",gap:4}}>
+                  <div style={{flex:1}}>
+                    <PoleMap poles={poleData.p.poles} zeros={poleData.p.zeros} title="P — click to place" isZ={isZ} onPlace={pt=>handlePoleP(pt,isZ)} w={200} h={170}/>
+                    <BodePlot Kp={isZ?pd.Kp:pc.Kp} Ki={0} Kd={0} Td={0} filtN={0} Te={Te} isZ={isZ} tau={tau} title="Bode P" color="#3b82f6" w={200} h={140}/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <PoleMap poles={poleData.pi.poles} zeros={poleData.pi.zeros} title="PI — click to place" isZ={isZ} onPlace={pt=>handlePolePI(pt,isZ)} w={200} h={170}/>
+                    <BodePlot Kp={isZ?pid_.Kp:pic.Kp} Ki={kiOf(isZ?pid_.Kp:pic.Kp,isZ?pid_.Ti:pic.Ti)} Kd={0} Td={0} filtN={0} Te={Te} isZ={isZ} tau={tau} title="Bode PI" color="#059669" w={200} h={140}/>
+                  </div>
+                  <div style={{flex:1}}>
+                    <PoleMap poles={poleData.pid.poles} zeros={poleData.pid.zeros} title="PID — click to place" isZ={isZ} onPlace={pt=>handlePolePID(pt,isZ)} w={200} h={170}/>
+                    <BodePlot Kp={isZ?pidd.Kp:pidc.Kp} Ki={kiOf(isZ?pidd.Kp:pidc.Kp,isZ?pidd.Ti:pidc.Ti)} Kd={(isZ?pidd.Kp:pidc.Kp)*((isZ?pidd.Td:pidc.Td)||0)} Td={isZ?pidd.Td:pidc.Td} filtN={isZ?(filtD.on?filtD.N:0):(filtC.on?filtC.N:0)} Te={Te} isZ={isZ} tau={tau} title="Bode PID" color="#1d4ed8" w={200} h={140}/>
+                  </div>
+                </div>
+                <div style={{fontSize:8,color:"#64748b",textAlign:"center",marginTop:2}}>
+                  <span style={{color:"#dc2626"}}>✕</span> CL poles &nbsp; <span style={{color:"#059669"}}>○</span> zeros &nbsp;|&nbsp; Drag a pole <span style={{color:"#dc2626"}}>✕</span> or click to place — Kp updates in real time
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.render(<App/>,document.getElementById("root"));
+</script>
+</body>
+</html>
